@@ -1,0 +1,59 @@
+---
+title: 'Tree Time: Phylogenetic Comparative Methods in R'
+output: html_notebook
+---
+
+# Brownian motion Simulation
+
+Here we will simulate Brownian motion, to look at how the scale parameter impacts simulated evolution. 
+
+First we wll simulate Brownian motion with scale (sig^2) of 0.001.
+
+```{r}
+t <- 0:100  # time
+sig2 <- 0.001
+## first, simulate a set of random deviates
+x <- rnorm(n = length(t) - 1, sd = sqrt(sig2))
+## now compute their cumulative sum
+x <- c(0, cumsum(x))
+plot(t, x, type = "l", ylim = c(-2, 2),xlab="Time (Ma)",ylab="Trait Value (mm)",main="Brownian motion Simulation")
+
+```
+
+Lets increase the scale factor to 0.01.
+
+```{r}
+sig2 <- 0.01
+## first, simulate a set of random deviates
+x <- rnorm(n = length(t) - 1, sd = sqrt(sig2))
+## now compute their cumulative sum
+x <- c(0, cumsum(x))
+plot(t, x, type = "l", ylim = c(-2, 2),xlab="Time (Ma)",ylab="Trait Value (mm)",main="Brownian motion Simulation")
+```
+
+Now lets look at multiple simulations - imagine this is multiple lineages evolving following Brownian motion.
+
+```{r}
+nsim<-1000
+sig2 <- 0.001
+
+X <- matrix(rnorm(n = nsim * (length(t) - 1), sd = sqrt(sig2)), nsim, length(t) - 
+    1)
+X <- cbind(rep(0, nsim), t(apply(X, 1, cumsum)))
+plot(t, X[1, ], ylim = c(-2, 2), type = "l",,xlab="Time (Ma)",ylab="Trait Value (mm)",main="Brownian motion Simulation")
+apply(X[2:nsim, ], 1, function(x, t) lines(t, x), t = t)
+```
+
+Again, lets increase the scale factor.
+```{r}
+sig2<-0.01
+X <- matrix(rnorm(n = nsim * (length(t) - 1), sd = sqrt(sig2)), nsim, length(t) - 
+    1) 
+X <- cbind(rep(0, nsim), t(apply(X, 1, cumsum)))
+plot(t, X[1, ], ylim = c(-2, 2), type = "l",,xlab="Time (Ma)",ylab="Trait Value (mm)",main="Brownian motion Simulation")
+apply(X[2:nsim, ], 1, function(x, t) lines(t, x), t = t)
+```
+
+
+
+

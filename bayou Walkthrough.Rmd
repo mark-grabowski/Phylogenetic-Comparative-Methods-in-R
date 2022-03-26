@@ -1,0 +1,406 @@
+---
+title: 'Tree Time: Phylogenetic Comparative Methods in R'
+output: html_notebook
+---
+# bayou
+
+## Data Setup
+
+Let's again use the Isler et al. (2008) brain-body dataset to look at the adaptive landscape for brain size in bayou (Uyeda and Harmon 2014; Uyeda et al. 2017). This analysis is broadly similar to one from Grabowski et al. (in revision), except we will be only running a single trait (brain size here). We will also be using the primate phylogeny from the 10K Trees website (Arnold et al. 2010).
+
+The data set and tree are available on the Mark’s github page (https://github.com/mark-grabowski/Phylogenetic-Comparative-Methods-in-R)
+
+
+Note that some code is based on Josef Uyeda's bayou tutorial at: https://github.com/uyedaj/bayou/blob/master/tutorial.md
+
+```{r}
+closeAllConnections()
+#detach("package:treeplyr", unload = TRUE)
+
+rm(list=ls()) #Clear the workspace
+par(mfrow=c(1,1))
+#library(usethis) 
+#usethis::edit_r_environ()
+#R_MAX_VSIZE=100Gb
+#install.packages("devtools") #Install bayou from github
+#require(devtools)
+#install_github("uyedaj/bayou",force=TRUE)
+
+library(bayou)
+#library(phytools)
+#library(treeplyr)
+library(dplyr)
+#library(doParallel)
+library(doParallel)
+no_cores <- detectCores()
+registerDoParallel(cores=no_cores)  
+#install.packages("doParallel", repos="http://R-Forge.R-project.org")
+
+options(scipen=999) #Dont have a ton of decimal places
+
+```
+
+Read in all data, including data on brain and body size with measurement error from Grabowski et al. (2016)
+```{r}
+setwd("~/Documents/Academic/Classes Taught/Workshops/Tree Time Workshop/Data")
+#setwd("[YOUR FILE PATH HERE]")
+
+phylo.tree<-read.tree("10KPrimateTree.tre") #10K Trees tree 
+
+BrBo.data<-read.csv("BrBo_Grabowski_2016.csv") #Brain and Body data from Isler et al. including measurement error estimated in Grabowski et al. 2016
+
+```
+
+Lets look at our tree
+```{r}
+#plot(phylo.tree) #Labels too big!
+
+plot(phylo.tree,cex=0.15)
+```
+
+Get tree length and change to length = 1
+```{r}
+max(branching.times(phylo.tree)) #Get length of tree
+l.tree<-max(branching.times(phylo.tree))
+phylo.tree$edge.length<-phylo.tree$edge.length/l.tree ## rescale tree to height 1
+max(branching.times(phylo.tree))
+
+```
+
+Fix issues with tree - this is very important for bayou. We also reorder the tree to postorder to match up with the approach of bayou.
+```{r}
+phylo.tree <- multi2di(phylo.tree, random=FALSE)#Fix problems with bifurcating branches
+phylo.tree$edge.length[phylo.tree$edge.length==0] <- .Machine$double.eps
+
+#Reorder tree "postorder" to match bayou
+phylo.tree<-reorder(phylo.tree,order = "postorder")
+max(branching.times(phylo.tree))
+```
+
+
+Add on measurement error columns for Brain and Body Size. This is the sample variance of brain and body siz divided by the sample size. Here we are using estimated measurement variance as there are a number of primate species with too small sample sizes to adequately estimate measurement variance following Grabowski et al. (2016). Following this approach, species with larger sample sizes have more weight towards the global within-species variance estimates.
+
+```{r}
+BrBo.data$N.ECV.species
+
+BrBo.data<-mutate(BrBo.data,me.ECV.species=BrBo.data$predict.sp.ECV/BrBo.data$N.ECV.species) #Also from dpylr
+BrBo.data<-mutate(BrBo.data,me.BoM.species=BrBo.data$predict.sp.BoM/BrBo.data$N.body.mass.species)
+
+```
+
+Make matched tree and data objects using treeplyr
+```{r}
+library(treeplyr)
+BrBo.trdata <- make.treedata(phylo.tree, BrBo.data,name_column="Genus_Species")
+```
+
+Make sure the dataset is complete - remove NAs, remove species without at least 1 male and 1 female
+```{r}
+BrBo.trdata<-filter(BrBo.trdata,!is.na(ECV.species.mean)&!is.na(Body.mass.species.mean))
+dim(BrBo.trdata$dat)
+
+#For original file with non-substuted males/females for species means
+BrBo.trdata<-filter(BrBo.trdata, N.ECV.male>=1 & N.body.mass.male>=1 & N.ECV.female>=1 & N.body.mass.female>=1 & N.ECV.species>1 & N.body.mass.species>1)
+
+```
+
+To keep things easy, lets separate the matched treeplyr object into its components and change the format of a few of these as required by bayou.
+```{r}
+#ECV
+log.ECV.dat<-log(BrBo.trdata[['ECV.species.mean']])
+me.ECV.species<-BrBo.trdata[['me.ECV.species']]
+
+#Body Mass
+log.BoM.dat<-log(BrBo.trdata[['Body.mass.species.mean']])
+log.BoM.dat<-as.matrix(log.BoM.dat) #Bayou requiresa the predictor to be in matrix format
+colnames(log.BoM.dat)<-"log.BoM.dat" #With column names
+#log.BoM.dat<-t(log.BoM.dat)
+log.BoM.dat.vis<-log(BrBo.trdata[['Body.mass.species.mean']])
+ #Save an additional predictor for visualizing below
+
+me.BoM.species<-BrBo.trdata[['me.BoM.species']]
+
+phylo.tree<-BrBo.trdata$phy
+
+```
+
+Visualize the trait on the tree (always do this!!) - this is from phytools R package, and we could have done this in our Slouch analysis too.
+```{r}
+#quartz()
+phenogram(phylo.tree, log.ECV.dat, spread.labels=FALSE, fsize=0.4)
+phenogram(phylo.tree, log.BoM.dat.vis, spread.labels=FALSE, fsize=0.4)
+
+```
+
+## Setting Priors
+
+bayou is a Bayesian approach, and as such it requires we provide priors on the main parameters being estimated.
+
+First we will determine the prior on the alpha (rate of adaptation) parameter. Remember, tree height here is 1. We will use a log-normal distribution for the alpha prior, which is only positive values. Since tree length = 73 Ma, this means that we are shooting for 10% of the prior distribution being =< 0.014 
+```{r}
+#Josef's suggestion - use half life that is 10% 0-1 Ma, 80% 1-Tree length, 10% > Tree length
+#Alphas based on log normal distribution
+quantiles <- c(0, 0.01, 0.05,0.10, 0.20, 0.5, 0.80, 0.90,0.95, 0.99, 1)
+alpha <- rlnorm(10000, meanlog=log(1),sdlog=0.75)
+qs <- quantile(log(2)/alpha, quantiles) ## Use 'alfs' and math to calculate the quantiles of phylogenetic half-life
+round(qs, 2)
+
+
+hist((log(2)/alpha), breaks=10000, main="Prior density of half-life",xlim=c(0,3))
+abline(v=(c(0.014,1)), col="red", lwd=2, lty=2) #Lines for 1 Ma and length of tree (14 Ma) - 
+
+
+```
+Let's set the alpha parameter to the values we found above
+```{r}
+param.alpha<-list(meanlog=log(0.5),sdlog=0.75)
+
+```
+
+
+Below is a list of the priors you can enter in bayou - this was created by me for my own reference, and we will not be using a lot of these today.
+```{r}
+#dtheta = must be continuous and describes the prior dist of the optoma
+#lambda = Poission and Conditional Poisson cdpois are provided to the parameter lambda, which provides the total number pof shifts on the tree
+#dsb = prior probability of a branch having shifts, dsb function
+#dloc = prior probability of the location of a shift within a single branch
+#dk = prior distribution of number of shifts
+#kmax = max number of shifts
+
+#k = number of shifts
+#ntheta = number optima
+#theta = vector of optima values of lenght ntheta
+#theta[1] = root value at optimum
+#sb = branch locations of shifts, equal to k
+#loc = location of shift on the branch - distance from starting point on the branch
+#t2 = identity of the optima after the shift, correspoinding to the ith element of the theta vector
+#Can fit convergent models using fixed shift locations by specifying multiple shifts to the same value of t2
+```
+
+We can now define our prior for our model. The prior function is going to take our parameters and outputs the prior probability of our parameter values. It represents our initial degree of belief in what values the parameters will take. 
+
+```{r}
+
+priorOU <- make.prior(phylo.tree, 
+                      dists=list(dalpha="dlnorm", dsig2="dhalfcauchy", dsb="dsb",
+                                 dk="cdpois", dtheta="dnorm"),
+                      param=list(dalpha=list(meanlog=param.alpha$meanlog, sdlog=param.alpha$sdlog),
+                                 dk=list(lambda=10, kmax=50), dsb=list(bmax=1, prob=1), 
+                                 dtheta=list(mean=mean(log.ECV.dat), sd=1.5*sd(log.ECV.dat)))
+)
+
+```
+
+To run our MCMC, we initiate the MCMC chain with some starting values. It's good to run multiple chains from multiple different starting values. Let's simulate some values from the prior distribution and make sure our prior functions looks reasonable.
+
+```{r}
+startpars <- priorSim(priorOU, phylo.tree, plot=TRUE)$pars[[1]]
+priorOU(startpars)
+
+```
+
+
+## Initiating Chains
+
+We're now going to take what we have and put it into the function bayou.makeMCMC. This function does not immediately initiate the MCMC, but it makes an object that we can use to manage our MCMC analysis. When bayou runs an MCMC, it writes the output to a set of files that will be put in a temporary location.
+
+```{r, include=FALSE}
+mcmcOU.ch1 <- bayou.makeMCMC(phylo.tree, log.ECV.dat, SE=0, prior=priorOU,outname="modelOU.ch1", plot.freq=NULL) # Set up the MCMC
+mcmcOU.ch1$run(100000) # Run the MCMC
+
+mcmcOU.ch2 <- bayou.makeMCMC(phylo.tree, log.ECV.dat, SE=0, prior=priorOU,outname="modelOU.ch2", plot.freq=NULL) # Set up the MCMC
+mcmcOU.ch2$run(100000) # Run the MCMC
+```
+
+The full MCMC results are written to a set of files. We can load them back in to R as follows.
+```{r}
+chainOU.ch1 <- mcmcOU.ch1$load()
+chainOU.ch2 <- mcmcOU.ch2$load()
+```
+
+Let's take a look at the results. We can set a "burnin" parameter that tells the set.burnin function from the package coda to discard the first bit of the chain.
+
+```{r}
+chainOU.ch1 <- set.burnin(chainOU.ch1, 0.3)
+summary(chainOU.ch1)
+#plot(chainOU, auto.layout=FALSE)
+chainOU.ch2 <- set.burnin(chainOU.ch2, 0.3)
+summary(chainOU.ch2)
+
+```
+
+Our chains may look ok as we ran 100,000 generations, but this can be determined first looking a the effective sample sizes, and then
+
+Our traces will probably look bad, 10,000 generations isn't long enough to obtain convergence. Also, note the small effective sample sizes in our summary (the NA's for the *all theta* row are expected, this is because these aren't a single parameter, but a variable number of optima that are coming in and out of existence throughout the chain). 
+
+Let's visualize what we have so far. First, we will plot the truth, then 3 alternative ways of visualizing our chain.
+
+
+Lets compare the chains using Gelman's R statistic. From Uyeda et al. (2014) - "Values of R close to 1 indicate that the two chains are not distinguishable, whereas high values (we used a cutoff of R = 1.1) indicate nonstationarity of the chains."
+```{r}
+RlnL.12 <- gelman.R("lnL", chain1=chainOU.ch1, chain2=chainOU.ch2, plot=TRUE, type="n")
+Ralpha.12 <- gelman.R("alpha", chain1=chainOU.ch1, chain2=chainOU.ch2, plot=TRUE, type="n")
+Rsig2.12 <- gelman.R("sig2", chain1=chainOU.ch1, chain2=chainOU.ch2, plot=TRUE, type="n")
+
+#Now lets look at where the shifts are estimated - are they in similar places on the tree?
+L1 <- Lposterior(chainOU.ch1,phylo.tree, burnin=0.3)
+L2 <- Lposterior(chainOU.ch2,phylo.tree, burnin=0.3)
+plot(L1$pp,L2$pp, xlim=c(0,1), ylim=c(0,1), xlab="Chain 1", ylab="Chain 2")
+curve(1*x, add=TRUE, lty=2)
+```
+
+
+The chains look ok, so now lets combine them
+```{r}
+chains.OU <- combine.chains(list(chainOU.ch1, chainOU.ch2), burnin.prop=0.3)
+```
+
+And finally lets make some figures from our results showing shift locations for regimes - these will be written to a pdf file.
+
+```{r}
+library(ggsci)
+#########################
+par(mfrow=c(1,1))
+par(bg = 'white')
+#cols<-viridis(4)
+
+reg.colors<-pal_aaas(palette=c("default"),alpha=0.8)(9)
+library(scales)
+show_col(pal_aaas("default")(9))
+
+#Posterior probabilities proportional to circle diameter:
+pdf("Simmap_mcmc.pdf", height=6, width=4)
+
+#No tip labels - main plot
+plotSimmap.mcmc(chains.OU, cex=0.2,lwd=1.0,edge.type="regimes", pp.cutoff=0.5,circle.cex.max = 4.0,label.offset=1,pal = pal_aaas(),show.tip.label=FALSE)
+axisPhylo(side=1,cex.axis=0.6,lwd=0.6)
+
+#With tip labels for SI
+plotSimmap.mcmc(chains.OU, cex=0.2,lwd=1.0,edge.type="regimes", pp.cutoff=0.5,circle.cex.max = 4.0,label.offset=0.01,pal = pal_aaas(),show.tip.label=TRUE)
+axisPhylo(side=1,cex.axis=0.6,lwd=0.6)
+
+#With edge labels
+plotSimmap.mcmc(chains.OU, cex=0.2,lwd=1.0,edge.type="regimes",pp.cutoff=0.5,circle.cex.max = 1.0,circles=FALSE,pp.labels = TRUE,pp.cex=0.25)
+edgelabels(cex=0.25,frame="none",adj=c(1,1))
+axisPhylo(side=1,cex.axis=0.6,lwd=0.6)
+
+#Fig S1
+plotBranchHeatMap(phylo.tree, chains.OU, variable="theta",pal=cm.colors,cex=0.2)
+
+
+
+
+dev.off()
+
+```
+
+## Testing hypotheses
+
+Next lets put some hypothetical shifts on our phylogeny and compare the fit of this model to our phylogenetic natural history model found above.
+
+Below is a list of the priors you can enter in bayou - this was created by me for my own reference, and we will not be using a lot of these today.
+
+```{r}
+#dtheta = must be continuous and describes the prior dist of the optoma
+#lambda = Poission and Conditional Poisson cdpois are provided to the parameter lambda, which provides the total number pof shifts on the tree
+#dsb = prior probability of a branch having shifts, dsb function
+#dloc = prior probability of the location of a shift within a single branch
+#dk = prior distribution of number of shifts
+#kmax = max number of shifts
+
+#k = number of shifts
+#ntheta = number optima
+#theta = vector of optima values of lenght ntheta
+#theta[1] = root value at optimum
+#sb = branch locations of shifts, equal to k
+#loc = location of shift on the branch - distance from starting point on the branch
+#t2 = identity of the optima after the shift, correspoinding to the ith element of the theta vector
+#Can fit convergent models using fixed shift locations by specifying multiple shifts to the same value of t2
+```
+
+```{r}
+#test<-identifyBranches(phylo.tree,2,fixed.loc=FALSE,plot.simmap = TRUE)
+test<-NULL
+test$sb<-c(273,115)
+fixed.priorOU <- make.prior(phylo.tree, 
+                      dists=list(dalpha="dlnorm", dsig2="dhalfcauchy", dsb="fixed",
+                                 dk="fixed", dtheta="dnorm",dloc="dunif"),
+                      param=list(dalpha=list(meanlog=param.alpha$meanlog, sdlog=param.alpha$sdlog),
+                                 dtheta=list(mean=mean(log.ECV.dat), sd=1.5*sd(log.ECV.dat))),
+                             fixed=list(k = 2, ntheta = 3, sb = test$sb)
+)
+
+
+```
+
+To run our MCMC, we have to initiate the MCMC chain with some starting values. It's good to run multiple chains from multiple different starting values. Let's simulate some values from the prior distribution and make sure our prior functions works.
+
+```{r}
+startpars <- priorSim(fixed.priorOU, phylo.tree, plot=TRUE)$pars[[1]]
+priorOU(startpars)
+```
+
+
+Lets run the function bayou.makeMCMC again giving it our data and tree and our fixed priors, and then start the chain running.
+
+```{r,include=FALSE}
+fixed.mcmcOU.ch1 <- bayou.makeMCMC(phylo.tree, log.ECV.dat, SE=0, prior=fixed.priorOU,outname="fixed.modelOU.ch1", plot.freq=NULL) # Set up the MCMC
+
+fixed.mcmcOU.ch1$run(100000) # Run the MCMC
+
+```
+
+The full MCMC results are written to a set of files. We can load them back in to R as follows.
+```{r}
+fixed.chainOU.ch1 <- fixed.mcmcOU.ch1$load()
+
+```
+
+Let's take a look at the results. We can set a "burnin" parameter that tells the set.burnin function from the package coda to discard the first bit of the chain.
+
+```{r}
+fixed.chainOU.ch1 <- set.burnin(fixed.chainOU.ch1, 0.3)
+summary(fixed.chainOU.ch1)
+#plot(chainOU, auto.layout=FALSE)
+
+```
+
+## Model Comparison
+
+Models can be compared by calculation of Bayes Factors, which allow for Bayesian model selection. The basic idea is the probability of model1 is compared to model2 on the basis of the observed data, with Bayes Factors showing the ratio of the posterior probabilities of M1:M2.
+
+```{r}
+## Run the stepping stone estimation of marginal likelihoods.
+#library(doParallel)
+#doParallel::registerDoParallel(cores=4)
+ngens<-10000
+
+Bk <- qbeta(seq(0,1, length.out=50), 0.3,1)
+ss.Fixed <- fixed.mcmcOU.ch1$steppingstone(ngens, fixed.chainOU.ch1, Bk)
+ss.PNH <- mcmcOU.ch1$steppingstone(ngens, chainOU.ch1, Bk)
+
+
+#Bayes factor comparison
+2*(ss.PNH$lnr-ss.Fixed$lnr)
+
+mlnL <- c("Fixed"=ss.Fixed$lnr, "PNH"=ss.PNH$lnr)
+mlnL
+
+
+```
+
+Nice job!
+
+# References
+
+Arnold, Christian, Luke J Matthews, and Charles L Nunn. “The 10kTrees Website: A New Online Resource for Primate Phylogeny.” Evolutionary Anthropology 19, no. 3 (June 23, 2010): 114–18. https://doi.org/10.1002/evan.20251.
+
+Grabowski, Mark, Kjetil L Voje, and Thomas F Hansen. “Evolutionary Modeling and Correcting for Observation Error Support a 3/5 Brain-Body Allometry for Primates.” Journal of Human Evolution 94 (May 1, 2016): 106–16. https://doi.org/10.1016/j.jhevol.2016.03.001.
+
+Isler, Karin, E Christopher Kirk, Joseph M A Miller, Gene A Albrecht, Bruce R Gelvin, and Robert D Martin. “Endocranial Volumes of Primate Species: Scaling Analyses Using a Comprehensive and Reliable Data Set.” Journal of Human Evolution 55, no. 6 (December 1, 2008): 967–78. https://doi.org/10.1016/j.jhevol.2008.08.004.
+
+Uyeda, J C, and L J Harmon. “A Novel Bayesian Method for Inferring and Interpreting the Dynamics of Adaptive Landscapes from Phylogenetic Comparative Data.” Systematic Biology 63, no. 6 (October 13, 2014): 902–18. https://doi.org/10.1093/sysbio/syu057.
+
+Uyeda, Josef C, Matthew W Pennell, Eliot T Miller, Rafael Maia, and Craig R McClain. “The Evolution of Energetic Scaling across the Vertebrate Tree of Life.” American Naturalist 190, no. 2 (August 2, 2017): 185–99. https://doi.org/10.1086/692326.
+
+

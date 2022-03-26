@@ -1,0 +1,545 @@
+---
+title: 'Tree Time: Phylogenetic Comparative Methods in R'
+output: html_notebook
+---
+# Slouch
+
+We will be using the Isler et al. (2008) Primate Brain-Body Dataset, with measurement error calculated following Grabowski et al. (2016) and categorical social system and group size data from Decasien et al. (2017) to explore model fitting using SLOUCH (Kopperud et al. 2020). We will also be using the primate phylogeny from the 10K Trees website (Arnold et al. 2010). 
+
+The data set and tree are available on the Mark’s github page (https://github.com/mark-grabowski/Phylogenetic-Comparative-Methods-in-R)
+
+
+## Data setup
+First lets read in the data.
+```{r}
+rm(list=ls()) #Clear the workspace
+
+#install.packages("devtools") #Install bayou from github
+#require(devtools)
+#devtools::install_github("kopperud/slouch") #Install latest version of Slouch from the developer page
+
+library(slouch)
+library(phytools)
+library(treeplyr)
+
+options(scipen=999) #Dont have a ton of decimal places
+
+```
+
+Read in all data, including data on brain and body size with measurement error from Grabowski et al. (2016)
+```{r}
+setwd("~/Documents/Academic/Classes Taught/Workshops/Tree Time Workshop/Data") #Set working directory for the block
+#setwd("[YOUR FILE PATH HERE]")
+
+phylo.tree<-read.tree("10KPrimateTree.tre") #10K Trees tree 
+
+BrBo.data<-read.csv("BrBo_Grabowski_2016.csv") #Brain and Body data from Isler et al. including measurement error estimated in Grabowski et al. 2016
+
+SS.data<-read.csv("DeCasien SS Data.csv") #Social system data from DeCasien et al. 2017
+
+Avg_GS.data<-read.csv("Avg_Group_Size_DeCasien.csv") #Group Size data from DeCasien et al. 2017
+
+
+```
+
+## Tree Exploration
+
+Lets look at our tree
+```{r}
+#plot(phylo.tree) #Labels too big!
+
+plot(phylo.tree,cex=0.15)
+```
+
+
+`str` is a useful commands for determining what is in an R object:
+```{r}
+str(phylo.tree)
+```
+
+Each element of the list can be accessed by multiple means - standard R
+```{r}
+head(phylo.tree[['tip.label']])
+head(phylo.tree[[3]])
+head(phylo.tree$tip.label)
+```
+
+Lets plot the tree with node labels - these are the points where the branches split and also end
+```{r}
+plot(phylo.tree,cex=0.15)
+nodelabels(cex=0.25)
+
+```
+The structure of the tree is stored in the edge matrix, which has the node numbers
+```{r}
+head(phylo.tree$edge)
+```
+
+
+
+And branch lengths are stored in the list element `edge.length`
+```{r}
+head(phylo.tree$edge.length)
+```
+
+
+Tips can be dropped with the function `drop.tip`:
+```{r}
+#Drop tip - Homo sapiens
+phylo.tree
+
+drop.tip(phylo.tree, c("Homo_sapiens"))
+```
+
+## Data Exploration
+
+Let's look at our data - always do this first!
+```{r}
+head(BrBo.data)
+```
+
+```{r}
+head(SS.data)
+```
+
+```{r}
+head(Avg_GS.data)
+```
+
+Add on measurement error columns for Brain and Body Size. This is the sample variance of brain and body siz divided by the sample size. Here we are using estimated measurement variance as there are a number of primate species with too small sample sizes to adequately estimate measurement variance following Grabowski et al. (2016). Following this approach, species with larger sample sizes have more weight towards the global within-species variance estimates.
+
+```{r}
+#Brain/Body/Diet Data
+BrBo.data$N.ECV.species
+
+BrBo.data<-mutate(BrBo.data,me.ECV.species=BrBo.data$predict.sp.ECV/BrBo.data$N.ECV.species) #Also from dpylr
+BrBo.data<-mutate(BrBo.data,me.BoM.species=BrBo.data$predict.sp.BoM/BrBo.data$N.body.mass.species)
+
+```
+## Rescale and fix tree
+
+Fix issues with tree
+```{r}
+phylo.tree <- multi2di(phylo.tree, random=FALSE) #Fix problems with bifurcating branches
+phylo.tree$edge.length[phylo.tree$edge.length==0] <- .Machine$double.eps
+```
+
+Get tree height and scale to 1
+```{r}
+max(branching.times(phylo.tree)) #Get height of tree
+
+l.tree<-max(branching.times(phylo.tree))
+phylo.tree$edge.length<-phylo.tree$edge.length/l.tree ## rescale tree to height 1
+
+max(branching.times(phylo.tree)) #Get height of tree
+
+```
+
+## Match Up Data with Tree
+Now lets set up our data, matching the brain-body dataset with the tree. ALWAYS DO THIS - For one thing the species tree may be in a different order than your dataset, you may be missing species in the dataset or on the tree, etc.
+
+For some species we have missing data
+```{r}
+missing <- phylo.tree$tip.label[!phylo.tree$tip.label %in% BrBo.data$Genus_Species]
+head(missing)
+
+```
+
+Manual matching up (harder)
+```{r}
+head(phylo.tree$tip.label) #Look at the first 6 species names to get the format - has to exactly match the dataset
+head(BrBo.data$Genus_Species)
+
+subset.tree<-drop.tip(phylo.tree,setdiff(phylo.tree$tip.label,BrBo.data$Genus_Species))#Code to drop tips of tree that are not in dataset
+
+#Name all nodes, important later for Surface
+#subset.tree<-nameNodes(subset.tree)
+
+#Match up order of  data with tree
+data.rows<-match(subset.tree$tip.label,BrBo.data$Genus_Species)
+BrBo.data<-BrBo.data[data.rows,]
+
+## Check whether they are lined up correctly
+BrBo.data$Genus_Species == subset.tree$tip.label
+```
+
+Using treeplyr (easy)
+```{r}
+BrBo.trdata <- make.treedata(phylo.tree, BrBo.data,name_column="Genus_Species")
+```
+
+But lets go back and add the social system dataset to our main brain body dataset first
+
+Combine Social System Data into Brain Body Dataset first
+```{r}
+#Social System data
+BrBo.SS.data<-merge(BrBo.data,SS.data,by="Genus_Species")
+dim(BrBo.SS.data)
+
+#Average Group Size Data
+BrBo.SS.AGS.data<-merge(BrBo.SS.data,Avg_GS.data,by="Genus_Species")
+dim(BrBo.SS.AGS.data)
+
+```
+
+Then make a tree data object, and filter it based on complete (no NA) variables
+```{r}
+BrBo.SS.AGS.data <- make.treedata(phylo.tree, BrBo.SS.AGS.data,name_column="Genus_Species")
+BrBo.SS.AGS.data<-filter(BrBo.SS.AGS.data,!is.na(ECV.species.mean)&!is.na(Body.mass.species.mean)&!is.na(Social.System)) #filter is from the dplyr paackage
+
+dim(BrBo.SS.AGS.data$dat)
+
+#Make sure there is at least one male and one female for each species to produce the mean species estimate
+BrBo.SS.AGS.data<-filter(BrBo.SS.AGS.data, N.ECV.male>=1 & N.body.mass.male>=1 & N.ECV.female>=1 & N.body.mass.female>=1 & N.ECV.species>1 & N.body.mass.species>1)
+
+
+dim(BrBo.SS.AGS.data$dat)
+
+#write.table(BrBo.SS.trdata$dat,"Complete_dataset.csv",sep=",",row.names = FALSE)
+
+```
+
+Here we are looking getting an idea about the upper range for the maximum likelihood surface - phylogenetic half life (hl) and vy, which are the transformations of alpha and sigma^2 we talked about earlier.
+
+Phylogenetic half life is the time it takes for the expected trait value to evolve half the distance from the ancestral state to the primary optimum. Vy is the stationary variance of the OU process, and is equal to vy = sigma2_y/(2 X alpha), which is the expected among-species variance given a long period of evolution in a single niche. A good upper range for half-life is 3 * tree length, which is akin to Brownian motion. A good starting estimate is the 3* the among species variance of the predictor.
+
+```{r}
+#3* Variance of logged response is good upper range for vy says Kjetil, but too much in this case
+max.vy<-var(log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),na.rm=TRUE)
+max.hl<-max(branching.times(phylo.tree))
+```
+
+
+## Painting Regimes on the Tree
+Here we use ancestral character estimation to estimate how the discrete regimes or niches for social system have evolved on the tree - this must be done to use Slouch. We are using a very simple approach here from the "ape" R package called ace, which performs maximum likelihood estimation. 
+
+```{r}
+#################
+library(ape)
+
+########################
+#Social System
+reconstruction.ss <- ace(as.factor(BrBo.SS.AGS.data$dat$Social.System), BrBo.SS.AGS.data$phy, type = "d")
+
+reconstruction.ss
+```
+
+The Rate index matrix above shows the rate of transition between states, here taken as being equal - in other words you can move between any state with equal probability. This may or may not be reasonable - there are other approaches to  ancestral character estimation where all sorts of parameters can be done.
+
+Save the most likely internal regimes - these are the maximum likelihood regime assignments for each branch.
+```{r}
+## Extract the most likely regime for each internal node
+## These have order n+1, n+2, n+3 ...
+########
+head(reconstruction.ss$lik.anc)
+
+internal.regimes.ss <- apply(reconstruction.ss$lik.anc, 
+                               1, 
+                               function(e) colnames(reconstruction.ss$lik.anc)[which.max(e)])
+########
+
+```
+
+This is slightly fancy code just to plot the regimes on the tree
+```{r}
+library(ggsci)
+#Set colors
+mypal <- pal_aaas("default", alpha = 0.8)(4)
+library("scales")
+show_col(mypal)
+
+SS.shifts.total<-unlist(list(as.factor(BrBo.SS.AGS.data$dat$Social.System),factor(internal.regimes.ss))) #First unlist the regimes and combine the regimes at the tips with the internal regimes
+
+  edge.regimes <- factor(SS.shifts.total[BrBo.SS.AGS.data$phy$edge[,2]])
+  #Get ggplot colors used for plot to make on tree
+
+  reg.colors<-mypal[unique(SS.shifts.total)]
+
+  print(reg.colors) #Order: Left-up,left-down,right-up,right-down
+  levels(edge.regimes)
+
+  plot(BrBo.SS.AGS.data$phy,edge.color = reg.colors[edge.regimes], edge.width = 1, cex = 0.2)
+  
+```
+
+## Analysis 1: Phylogenetic Signal 
+Here we are starting the actual analysis of our data. First we will look at whether there is any phlogenetic signal in our data. Remember, this can be caused by ancestral constraints (phylogenetic inertia) and species adapting to another variable that is itself phylogenetically structured. We will look at the phylognenetic half-life below, which is in units of time. Lets start with ECV. Phylogenetic signal can be estimated using a model with no predictor variables (i.e. only a fixed intercept in the model).
+
+```{r}
+ECV.ps<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              #mv.response=BrBo.SS.AGS.data$dat$me.ECV.species,
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy*3, length.out = 50),
+                              hillclimb = FALSE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.ps)
+
+```
+
+Now lets look at Body Mass
+```{r}
+BoM.ps<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              #mv.response=BrBo.SS.AGS.data$dat$me.ECV.species,
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = FALSE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(BoM.ps)
+
+```
+## Analysis 2: Allometric Effects
+Ok, lets start to explore where that phylogenetic signal in ECV may come from. We will first fit a model with ECV as the response variable and Body Mass as he predictor. We will use the direct effect model of slouch, as we assume this is an allometric relationship, where changes in body mass immediately lead to changes in brain mass.
+
+Note we are including measurement error in the code below
+
+```{r}
+ECV.BoM.direct<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              mv.response=BrBo.SS.AGS.data$dat$me.ECV.species, #Measurement error ECV
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species, #Measurement error BoM
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = FALSE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.BoM.direct)
+
+```
+We assumed a direct relationship between brain and body mass previously, but lets check that by testing if the adaptive model is a better fit than the direct model of evolution.
+```{r}
+ECV.BoM.adapt<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              random.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              mv.response=BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.random.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = FALSE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.BoM.adapt)
+
+```
+Lets compare the fit of the two models using AICc. Just many objects in R, we can access elements within the object.
+```{r}
+ECV.BoM.direct$modfit$AICc
+ECV.BoM.adapt$modfit$AICc
+```
+
+Now lets plot the results of the direct fit model using ggplot2
+```{r}
+library(ggplot2)
+
+gg.plot<-ggplot(BrBo.SS.AGS.data$dat, aes(x = log(Body.mass.species.mean), y = log(ECV.species.mean)))+
+  geom_point(aes(shape=Family))+
+  geom_abline(intercept=ECV.BoM.direct$beta_primary$coefficients[1,1],slope = ECV.BoM.direct$beta_primary$coefficients[2,1],lty=1)+
+  #geom_point(data=BoM.trait.ind.extant.data,mapping=aes(x=log(Body.mass.g),y=log(SI.Head.W),color=Family),size=0.1)+
+  theme_bw()+
+  theme(legend.position="bottom")+#5X5
+  xlab("log Body Mass (g)") + ylab("log ECV (cc)")+
+  #scale_color_aaas()
+  #scale_color_manual(values=mypal)
+  scale_shape_manual(values=1:nlevels(BrBo.SS.AGS.data$dat$Family))
+
+  
+gg.plot
+```
+Cool stuff.
+
+## Analysis 3: Social System
+Lets fit a model which combines our direct effect model run above with social system data. First we will fit the standard OU model.
+
+```{r}
+BrBo.SS.AGS.data$phy$node.label <- internal.regimes.ss #First add the regimes to the nodes of the tree - these were estimated above
+head(BrBo.SS.AGS.data$phy$node.label) #Lets look at these
+
+ECV.SS.BoM.OU<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              fixed.fact = as.factor(BrBo.SS.AGS.data$dat$Social.System), #Social system is fixed on the tree
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              mv.response= BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = FALSE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.SS.BoM.OU)
+```
+
+Now lets fit a model with regime dependent trends. This is from Hansen (1997) - the basic model is one where the pattern of evolution is akin to Brownian motion but with a trend, here we are testing if the trend is defined by the niches on the tree.
+
+```{r}
+ECV.SS.BoM.BM<-brown.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              fixed.fact = as.factor(BrBo.SS.AGS.data$dat$Social.System),
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              mv.response= BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              #hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              #vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = TRUE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.SS.BoM.BM)
+
+```
+
+And lets compare the models using AICc
+
+```{r}
+ECV.SS.BoM.OU #Lets look at what is stored in the Slouch object
+ECV.SS.BoM.OU$modfit$AICc #Now lets look at the AICc scores
+ECV.SS.BoM.BM$modfit$AICc
+
+```
+
+
+It appears like the trend model is a beter fit for the data, so lets make a figure for the results
+
+```{r}
+
+int.1<-ECV.SS.BoM.BM$beta_primary$coefficients[1,1]
+int.2<-ECV.SS.BoM.BM$beta_primary$coefficients[2,1]
+int.3<-ECV.SS.BoM.BM$beta_primary$coefficients[3,1]
+int.4<-ECV.SS.BoM.BM$beta_primary$coefficients[4,1]
+slope<-ECV.SS.BoM.BM$beta_primary$coefficients[5,1]
+
+gg.plot<-ggplot(BrBo.SS.AGS.data$dat, aes(x = log(Body.mass.species.mean), y = log(ECV.species.mean)))+
+  geom_point(aes(color=Social.System))+
+  
+  geom_abline(intercept=int.1,slope = slope,lty=1,color=mypal[1])+
+  geom_abline(intercept=int.2,slope = slope,lty=1,color=mypal[2])+
+  geom_abline(intercept=int.3,slope = slope,lty=1,color=mypal[3])+
+  geom_abline(intercept=int.4,slope = slope,lty=1,color=mypal[4])+
+
+    #geom_point(data=BoM.trait.ind.extant.data,mapping=aes(x=log(Body.mass.g),y=log(SI.Head.W),color=Family),size=0.1)+
+  theme_bw()+
+  theme(legend.position="bottom")+#5X5
+  xlab("log Body Mass (g)") + ylab("log ECV (cc)")+
+  scale_color_aaas()
+  #scale_color_manual(values=mypal)
+  #scale_shape_manual(values=1:nlevels(ECV.SS.BoM.BM$dat$Family))
+
+  
+gg.plot
+
+```
+
+Cool Stuff!
+
+Lets add in average group size, which is a continuous variable to the dataset.
+
+```{r}
+ECV.SS.AGS.BoM.OU<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              fixed.fact = as.factor(BrBo.SS.AGS.data$dat$Social.System),
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              random.cov = log(BrBo.SS.AGS.data$dat$Avg_GS),
+                              mv.response= BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = TRUE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.SS.AGS.BoM.OU)
+
+
+```
+
+Lets look at the trend model including average group size as a continuous variable.
+
+```{r}
+ECV.SS.AGS.BoM.BM<-brown.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              fixed.fact = as.factor(BrBo.SS.AGS.data$dat$Social.System),
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              random.cov = log(BrBo.SS.AGS.data$dat$Avg_GS),
+                              mv.response= BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              #hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              #vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = TRUE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.SS.AGS.BoM.BM)
+
+```
+
+Finally lets fit a model with just average group size. First lets do the OU model.
+
+```{r}
+ECV.AGS.BoM.OU<-slouch.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              random.cov = log(BrBo.SS.AGS.data$dat$Avg_GS),
+                              mv.response= BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = TRUE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.AGS.BoM.OU)
+```
+
+Then the Brownian motion model.
+
+```{r}
+ECV.AGS.BoM.BM<-brown.fit(phy = BrBo.SS.AGS.data$phy,
+                              species = BrBo.SS.AGS.data$phy$tip.label,
+                              response = log(BrBo.SS.AGS.data$dat$ECV.species.mean),
+                              direct.cov = log(BrBo.SS.AGS.data$dat$Body.mass.species.mean),
+                              random.cov = log(BrBo.SS.AGS.data$dat$Avg_GS),
+                              mv.response= BrBo.SS.AGS.data$dat$me.ECV.species,
+                              mv.direct.cov = BrBo.SS.AGS.data$dat$me.BoM.species,
+                              #hl_values = seq(0.00001, max.hl*3, length.out = 50),
+                              #vy_values = seq(0.00001, max.vy, length.out = 50),
+                              hillclimb = TRUE,convergence = 150,
+                              lower = c(0.00001, 0.00001))
+
+summary(ECV.AGS.BoM.BM)
+```
+
+
+Lets compare model fit across all models.
+```{r}
+ECV.SS.AGS.BoM.OU$modfit$AICc
+ECV.SS.AGS.BoM.BM$modfit$AICc
+ECV.SS.BoM.OU$modfit$AICc
+ECV.SS.BoM.BM$modfit$AICc
+ECV.AGS.BoM.OU$modfit$AICc
+ECV.AGS.BoM.BM$modfit$AICc
+ECV.BoM.direct$modfit$AICc
+ECV.BoM.adapt$modfit$AICc
+
+
+```
+Nice job!
+
+# References
+
+Arnold, Christian, Luke J Matthews, and Charles L Nunn. “The 10kTrees Website: A New Online Resource for Primate Phylogeny.” Evolutionary Anthropology 19, no. 3 (June 23, 2010): 114–18. https://doi.org/10.1002/evan.20251.
+
+DeCasien, Alex R., Scott A. Williams, and James P. Higham. “Primate Brain Size Is Predicted by Diet but Not Sociality.” Nature Ecology & Evolution 1, no. 5 (March 27, 2017): 1–7. https://doi.org/10.1038/s41559-017-0112.
+
+Grabowski, Mark, Kjetil L Voje, and Thomas F Hansen. “Evolutionary Modeling and Correcting for Observation Error Support a 3/5 Brain-Body Allometry for Primates.” Journal of Human Evolution 94 (May 1, 2016): 106–16. https://doi.org/10.1016/j.jhevol.2016.03.001.
+
+Isler, Karin, E Christopher Kirk, Joseph M A Miller, Gene A Albrecht, Bruce R Gelvin, and Robert D Martin. “Endocranial Volumes of Primate Species: Scaling Analyses Using a Comprehensive and Reliable Data Set.” Journal of Human Evolution 55, no. 6 (December 1, 2008): 967–78. https://doi.org/10.1016/j.jhevol.2008.08.004.
+
+Kopperud, B.T., J Pienaar, K.L. Voje, S.H. Orzack, and T.F. Hansen. Slouch: Stochastic Linear Ornstein-Uhlenbeck Comparative Hypotheses. R Package Version 2.1.4. (version 2.1.4). R, 2020.
