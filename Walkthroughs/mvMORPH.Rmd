@@ -1,0 +1,435 @@
+# Tree Time: Phylogenetic Comparative Methods in R
+## mvMORPH
+
+We will replicate the evolutionary modeling analysis published in Prang et al. (2021) using a different method and R package. The data set and tree are available on the Mark's github page and the Dryad Digital Data Repository:
+
+
+http://datadryad.org/stash/dataset/doi:10.5061/dryad.tmpg4f4x7
+
+Load the R packages:
+
+```{r}
+library(mvMORPH)
+library(phytools)
+library(picante)
+library(MASS)
+library(geomorph)
+```
+
+Set your working directory to the folder on your computer containing the data and tree:
+
+```
+setwd("[YOUR FILE PATH HERE]")
+```
+
+Import the tree and data set:
+
+```
+tree <- read.nexus("tree.nex") # Molecular consensus tree from 10k trees (Arnold et al., 2010) with fossil taxa added in Mesquite
+data <- read.csv("data.csv")
+data <- na.omit(data[,3:29]) # Remove rows with missing values
+names <- data$taxon # Assign taxon names to an object called 'names' for use later
+```
+
+The data set contains linear distances collected on hand elements. We will create shape variables by dividing each raw measurement by their combined geometric mean per individual. The geometric mean is the nth root of the product of n values. We can also easily calculate it as the exponentiated mean of the natural logarithm of the values, which we will use here.
+
+```
+geomean <- as.matrix(apply(data[-1], 1, function(x) exp(mean(log(x))))) # Calculate a geometric mean for each row
+data["geomean"] <- geomean # Add geometric mean column to data
+data.gm <- as.matrix(apply(data[-1], 2, function(x) log(x/data$geomean))) # Divide each column by the geomean and log the value
+data.gm <- data.gm[,-27] # Drop geomean column
+data.gm <- as.data.frame(data.gm)
+data.gm["taxon"] <- names
+```
+
+We now have a data set containing 26 geometric mean-standardized hand measurements representing 421 individual hand skeletons and 58 taxa. We cannot fit evolutionary models to such a large data set, so we must reduce the dimensionality of the data, which we will do using Principal Components Analysis (PCA).
+
+```
+pca <- prcomp(data.gm[-27], scale = FALSE)  # PCA on variance-covariance matrix
+```
+
+It is a good idea to examine the results to make sure nothing went wrong.
+
+```{r}
+summary(pca) # Nothing anomalous here
+plot(pca) # Nothing anomalous here
+# Note that PC1, PC2, & PC3 represent ~76% of the variance, with small contributions from remaining PCs
+colors <- c(rep("dark grey", 67), # Humans
+          rep("purple", 62), # Chimpanzees and bonobos
+          rep("dark blue", 23), # Eastern gorillas
+          rep("dark green", 36), # Western gorillas
+          rep("orange", 33), # Orangutans
+          rep("royal blue", 54), # Hylobatids
+          rep("dark red", 83), # Old World monkeys
+          rep("light green", 58), # New World monkeys
+          rep("pink", 1), # Ardipithecus ramidus
+          rep("gold", 5)) # Australopithecus & Homo fossils
+
+# Plot the first three PCs:
+
+pc.scores <- as.data.frame(pca$x) # Store PC scores in an object for use in subsequent analyses
+
+eqscplot(matrix(c(pc.scores[,1], pc.scores[,2]), nrow=length(pc.scores[,1])), xlab = "PC1 (47%)", ylab = "PC2 (16%)", cex=1.5, col = colors, pch = 19)
+eqscplot(matrix(c(pc.scores[,1], pc.scores[,3]), nrow=length(pc.scores[,1])), xlab = "PC1 (47%)", ylab = "PC3 (13%)", cex=1.5, col = colors, pch = 19)
+
+```
+
+Cool! Everything looks good. We need to calculate the mean PC scores for each taxon and match the tree and the PC data:
+
+```
+pc.scores["taxon"] <- data$taxon # Add taxon column to PC scores
+pc.scores.avg <- aggregate(pc.scores[, 1:3], list(pc.scores$taxon), mean) # Retain the first 3 PCs
+row.names(pc.scores.avg) <- pc.scores.avg$Group.1 # Add row names to mean PC scores
+pc.scores.avg <- pc.scores.avg[,2:4] # Retain the PC scores
+comp.data <- match.phylo.data(tree, pc.scores.avg) # Match the order of the PC scores with the tip labels of the tree
+```
+
+### Phylogenetic signal
+
+Before fitting evolutionary models, let's evaluate the presence of "phylogenetic signal" in the dataset. Note: "phylogenetic signal" can refer to many different things and there are a number of methods abbvailable, all of which are distinct. Here, we will calculate Kmult (the multivariate version of Blomberg's Kappa statistic) implemented in the ``geomorph`` package. Kmult estimates the degree of "phylogenetic signal" present in a dataset relative to what is expected under a Brownian motion model of evolution. We can also calculate the univariate version (K, kappa statistic) for each PC (Adams et al., 2021).  
+
+K, Kmult = 1: Close relatives resemble each other as expected under a Brownian motion model.  
+K, Kmult < 1: Close relatives resemble each other *less* than expected under a Brownian motion model.  
+K, Kmult > 1: Close relatives resemble each other *more* than expected under a Brownian motion model.  
+
+p < 0.05: Evidence to reject the null hypothesis that the species values are randomized relative to expectations under Brownian motion.
+
+```{r}
+physignal(A = as.matrix(comp.data$data), phy = comp.data$phy, iter = 999) # First 3 PC scores
+plot(physignal(A = as.matrix(comp.data$data), phy = comp.data$phy, iter = 999)) # plot 
+
+physignal(A = as.matrix(comp.data$data[1]), phy = comp.data$phy, iter=999) # PC1
+physignal(A = as.matrix(comp.data$data[2]), phy = comp.data$phy, iter=999) # PC2
+physignal(A = as.matrix(comp.data$data[3]), phy = comp.data$phy, iter=999) # PC3
+```
+
+Can we reject the null hypothesis of no phylogenetic signal relative to that expected under Brownian motion?
+
+```
+|
+|
+```
+
+How would you interpret the K & Kmult values that you returned?
+
+```
+|
+|
+```
+
+Great! Now we can satisfy the reviewers with our analysis of phylogenetic signal :)
+
+
+### Evolutionary hypotheses
+
+We need to construct our evolutionary hypotheses before fitting evolutionary models. There are a couple of ways to do this. It's probably advisable to do it by taxon name, and you could even include the regimes in columns in excel, but that's a bit too cumbersome for our purpose. We will use a simple approach. Here, we will evaluate four alternative hypotheses (based on, and simplified from, Prang et al., 2021).
+
+H1: Brownian motion  
+H2: Single-optimum Ornstein-Uhlenbeck (OU)  
+H3: Multi-optimum OU: hand shape reflects substrate & locomotion (arboreal, semi-terrestrial, terrestrial, suspensory, bipedal/non-locomotor)  
+H4: Multi-optimum OU: hand shape reflects hand posture (palmigrady, digitigrady, knuckle-walking, suspension, manipulation/non-locomotor)  
+
+We don't need to do anything special for H1 and H2, but we need to manually assign regimes for H3 & H4.
+
+```{r}
+H3.regimes <- as.vector(c(rep("arb",1),
+                      rep("semiterr",1),
+                      rep("arb",4), 
+                      rep("susp",5), 
+                      rep("arb",6), 
+                      rep("susp",1), 
+                      rep("terr",1),
+                      rep("semiterr",1), 
+                      rep("terr",1), 
+                      rep("biped", 1), 
+                      rep("susp",5), 
+                      rep("semiterr",2), 
+                      rep("susp",3), 
+                      rep("arb",3), 
+                      rep("semiterr", 1),
+                      rep("arb", 3), 
+                      rep("semiterr",3), 
+                      rep("terr",7), 
+                      rep("arb", 2), 
+                      rep("semiterr", 1), 
+                      rep("arb", 1), 
+                      rep("semiterr", 1), 
+                      rep("biped", 4)))
+names(H3.regimes) <- comp.data$phy$tip.label # assign taxon names to regime labels
+print(H3.regimes) # examine
+```
+
+Now construct the vector of regimes for H4
+
+```{r}
+H4.regimes <- as.vector(c(rep("palm",6), 
+                      rep("susp",5), 
+                      rep("palm",6), 
+                      rep("susp",1), 
+                      rep("kw",3), 
+                      rep("biped", 1), 
+                      rep("susp",5), 
+                      rep("kw",2), 
+                      rep("susp",3), 
+                      rep("palm",3), 
+                      rep("dig", 1), 
+                      rep("palm", 3), 
+                      rep("dig",1),
+                      rep("palm",1),
+                      rep("dig", 8),
+                      rep("palm", 4),
+                      rep("kw",1),
+                      rep("biped", 4)))
+names(H4.regimes) <- comp.data$phy$tip.label # assign taxon names to regime labels
+print(H4.regimes) # examine
+```
+
+```mvMORPH``` maps regimes onto the tree using stochastic character mapping implemented in the ```phytools``` package.
+
+```{r}
+H3.tree <- make.simmap(comp.data$phy, H3.regimes, model="ER", nsim=1)
+plot(H3.tree, fsize = 0.5) # examine
+
+H4.tree <- make.simmap(comp.data$phy, H4.regimes, model="ER", nsims=1)
+plot(H4.tree, fsize = 0.5) # examine
+```
+
+Now we're ready to fit some evolutionary models to the data. ```mvMORPH``` (Clavel et al., 2015) enables you to fit many different models. Note: fitting more complex OU models may take longer than fitting a simple BM model.
+
+```{r}
+# H1. Brownian
+H1.BM <- mvBM(tree = comp.data$phy, data = comp.data$data, model = "BM1", param = list(root = FALSE))
+
+# H2. Single optimum Ornstein-Uhlenbeck (OU)
+H2.OU1 <- mvOU(tree = comp.data$phy, data = comp.data$data, model = "OU1", param = list(root = FALSE))
+
+# H3. Multi-optimum OU model
+H3.OUM <- mvOU(tree = H3.tree, data = comp.data$data, model = "OUM", param = list(root = FALSE))
+
+# H4. Multi-optimum OU model
+H4.OUM <- mvOU(tree = H4.tree, data = comp.data$data, model = "OUM", param = list(root = FALSE))
+```
+
+Let's examine the small sample size adjusted Akaike's Information Criterion (AICc) values to assess model fit. Smaller values indicate better model fit (increasingly negative numbers are smaller; moving left on a number line = smaller)
+
+```{r}
+AICc <- list(H1.BM$AICc, H2.OU1$AICc, H3.OUM$AICc, H4.OUM$AICc)
+names(AICc) <- c("H1.BM", "H2.OU1", "H3.OUM", "H4.OUM")
+print(AICc)
+```
+
+Which of the models best fits the data?
+
+```
+|
+|
+```
+
+You can extract the other relevant parameters (e.g., LogLikelihood, theta, alpha, sigma, etc.) by printing the objects storing the model fits. For example:
+
+```{r}
+print(H4.OUM)
+```
+
+We can also print the phylogenetic half lives for each variable (PC score) estimated under each alternative model:
+
+```{r}
+halflife(H2.OU1)
+halflife(H3.OUM)
+halflife(H4.OUM)
+```
+
+Try printing the phylogenetic half life for the Brownian motion model fit:
+
+```{r}
+halflife(H1.BM)
+```
+
+Why doesn't it work?
+
+```
+|
+|
+```
+
+Now for the fun part!
+
+### Phylogenetic Monte Carlo Simulations 
+
+Let's simulate some data fit to alternative evolutionary models to determine whether we have the power to distinguish between competing hypotheses given our tree and data set. This approach follows the recommendations of Boetigger et al. (2012). This approach was also used by Prang (2019) and Prang et al. (2021).
+
+The idea is relatively straightforward. It goes like this:
+
+- Fit two evolutionary models to a dataset and tree and calculate the Likelihood Ratio Statistic (-2*(logLik(fitA) - logLik(fitB)))
+- Simulate data under the parameters estimated by each evolutionary model.
+- Refit the evolutionary models to the simulated data sets.
+- Generate null and test distributions of the Likelihood Ratio Statistic.
+- Compare the observed Likelihood Ratio Statistic to the null and test distributions.
+
+For the sake of time and simplicity, let's compare Brownian motion and single-optimum OU models. The code used here was adapted from Carl Boettiger's code.
+
+```{r}
+fitA <- mvBM(tree = comp.data$phy, data = comp.data$data, model = "BM1", param = list(root = FALSE))
+fitB <- mvOU(tree = comp.data$phy, data = comp.data$data, model = "OU1", param = list(root = FALSE))
+
+lr_bmvou1 <- -2*(logLik(fitA) - logLik(fitB)) # Likelihood ratio statistic
+print(lr_bmvou1)
+
+nsims <- 10 # Note: this should be way higher (e.g., 1,000 or more)
+
+A_sims <- simulate(fitA, tree = comp.data$phy, nsims) # data simulated under BM
+B_sims <- simulate(fitB, tree = comp.data$phy, nsims) # data simulated under OU1
+
+# fit BM to data simulated under BM
+AA <- lapply(1:nsims, function(i){
+  mvBM(tree = comp.data$phy, data = A_sims[[i]], model="BM1", param = list(root = FALSE))})
+
+# fit OU1 to data simulated under BM
+AB <- lapply(1:nsims, function(i){
+  mvOU(tree = comp.data$phy, data = A_sims[[i]], model="OU1", param = list(root = FALSE))}) 
+
+# fit BM to data simulated under OU
+BA <- lapply(1:nsims, function(i){
+  mvBM(tree = comp.data$phy, data = B_sims[[i]], model="BM1", param = list(root = FALSE))}) 
+
+# fit OU1 to data simulated under OU
+BB <- lapply(1:nsims, function(i){
+  mvOU(tree = comp.data$phy, data = B_sims[[i]], model="OU1", param = list(root = FALSE))}) 
+
+```
+
+Phew. Okay, now we need to construct our 'null' and 'test' distributions. The 'null' distribution represents the expected likelihood ratio statistic values generated under the simpler of the two evolutionary models, whereas the 'test' distribution represents the expected likelihood ratio statistic values under the more complex of the two evolutionary models. First, create a new folder in your current working directory called "Simulation outputs" to store the .csv files containing null and test distributions.
+
+```{r}
+# Null distribution:
+null_dist <- -2*(sapply(AA, logLik) - sapply(AB, logLik)) # calculate Likelihood Ratio Statistic for all simulated model fits.
+write.csv(null_dist,"Simulation outputs/BM-OU1_nulldist_3-23-22.csv") # write this distribution to a .csv file in a 'Simulation outputs' folder.
+
+test_dist <- -2*(sapply(BA, logLik) - sapply(BB, logLik)) # calculate the Likelihood Ratio Statistic for all simulated model fits.
+write.csv(test_dist,"Simulation outputs/BM-OU1_testdist_3-23-22.csv") # write this distribution to a .csv file in a 'Simulation outputs' folder.
+```
+
+Now, let's plot our results! First, load the packages:
+
+```
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+I like to load the .csv files back in so that I can run the analysis, walk away for several hours (or more...), and come back to examine the results.
+
+```
+null_bm.ou1 <- read.csv("Simulation outputs/BM-OU1_nulldist_3-23-22.csv") # from new 'Simulation outputs' folder
+test_bm.ou1 <- read.csv("Simulation outputs/BM-OU1_testdist_3-23-22.csv") # from new 'Simulation outputs' folder
+```
+
+Compile the results for the null and test distributions:
+
+```
+results <- bind_rows(
+  data.frame(comparison = "bmv01", null = null_bm.ou1$x, test = test_bm.ou1$x, lr = lr_bmvou1))%>%
+  gather(variable, value, - comparison, - lr)
+```
+
+Plot using ```ggplot``` function
+
+```{r}
+ggplot(results) + 
+  geom_density(aes(value, fill = variable), alpha=0.5) + 
+  geom_vline(aes(xintercept=lr)) +
+  facet_wrap(~ comparison, scales="free") +
+  scale_x_continuous(limits=c(min(results$value - 100),max(results$value + 100)))
+```
+
+The results won't look pretty because we don't have enough time to complete all of the simulations, but you get the idea! The observed Likelihood Ratio Statistic falls outside of the range of the null distribution and within the range of the test distribution, which provides evidence that a single-optimum OU model is a better fit to the data than a Brownian motion model, consistent with our AIC and AICc results. Note: simulations and model fits for the most complex OU models could take 24+ hours, so be prepared! Make sure you adjust your computer settings so that it doesn't go to sleep!
+
+### References
+
+Adams, D.C., Collyer, M.L., Kaliontzopoulou, A., Baken, E.K. 2021. Geomorph: Software for geometric morphometric analyses. R package version 4.0.02. https://cran.r-project.org/package=geomorph.
+
+Arnold, C., Matthews, L.J., Nunn, C.L. 2010. The 10kTrees website: A new online resource for primate phylogeny. *Evol. Anthropol.* 19, 114-118.
+
+Boetigger, C., Koop, G., Ralph, P. 2012. Is your Phylogeny Informative: Measuring the power of comparative methods. Evolution 66, 2240-2251.
+
+Clavel, J., Escarguel, G., Merceron, G. 2015. mvMORPH: an R package for fitting multivariate evolutionary models to morphometric data. Methods in Ecology and Evolution 6, 1311-1319.
+
+Prang, T.C. 2019. The African ape-like foot of *Ardipithecus ramidus* and its implications for the origin of bipedalism. eLife 8, e44433.
+
+Prang, T.C., Ramirez, K., Grabowski, M., Williams, S.A. 2021. *Ardipithecus* hand provides evidence that humans and chimpanzees evolved from an ancestor with suspensory adaptations. *Science Advances* 7, eabf2474.
+
+### Supplementary code
+
+Here is the code to complete additional simulations with plotting options (it's up to you to decide how many models to construct and compare. 
+Pay special attention to the differences in:
+
+tree type(comp.data$phy under BM vs. H3.tree under OU)
+&
+model type (BM, OU1, or OUM)
+
+These parameters will need to be adjusted depending on which comparison you're performing.
+
+```
+# H2.OU1 vs. H3.OUM
+
+fitA <- mvOU(tree = comp.data$phy, data = comp.data$data, model = "OU1", param = list(root = FALSE))
+fitB <- mvOU(tree = H3.tree, data = comp.data$data, model = "OUM", param = list(root = FALSE))
+
+lr_H2.ou1vH3.OUM <- -2*(logLik(fitA) - logLik(fitB)) # Likelihood ratio statistic
+print(lr_H2.ou1vH3.OUM)
+
+nsims <- 1000 # A more realistic number of simulations
+A_sims <- simulate(fitA, tree = comp.data$phy, nsims) # data simulated under H2.OU1
+B_sims <- simulate(fitB, tree = H3.tree, nsims) # data simulated under H3.OUM
+
+
+AA <- lapply(1:nsims, function(i){
+  mvOU(tree = comp.data$phy, A_sims[[i]], model="OU1", param = list(root = FALSE))}) # fit OU1 to data simulated under OU1
+
+AB <- lapply(1:nsims, function(i){
+  mvOU(tree = H3.tree, A_sims[[i]], model="OUM", param = list(root = FALSE))}) # fit H3.OUM to data simulated under OU1
+
+BA <- lapply(1:nsims, function(i){
+  mvOU(tree = comp.data$phy, B_sims[[i]], model="OU1", param = list(root = FALSE))}) # fit OU1 to data simulated under H3.OUM
+
+BB <- lapply(1:nsims, function(i){
+  mvOU(tree = H3.tree, B_sims[[i]], model="OUM", param = list(root = FALSE))}) # fit H3.OUM to data simulated under H3.OUM
+
+null_dist <- -2*(sapply(AA, logLik) - sapply(AB, logLik))
+write.csv(null_dist,"Simulation outputs/OU1-H3.OUM_nulldist_3-23-22.csv")
+test_dist <- -2*(sapply(BA, logLik) - sapply(BB, logLik))
+write.csv(test_dist,"Simulation outputs/OU1-H3.OUM_testdist_3-23-22.csv")
+```
+
+Here is the example code for how you would combine the results from multiple simulations*:
+
+```
+# Import .csv files with your null and test distributions for each of your comparisons
+null_bm.ou1 <- read.csv("Simulation outputs/BM-OU1_nulldist_3-23-22.csv")
+test_bm.ou1 <- read.csv("Simulation outputs/BM-OU1_testdist_3-23-22.csv")
+null_ou1.h3 <- read.csv("Simulation outputs/OU1-H3.OUM_nulldist_3-23-22.csv")
+test_ou1.h3 <- read.csv("Simulation outputs/OU1-H3.OUM_testdist_3-23-22.csv")
+```
+
+*A note of caution: Be mindful of object and file names if you choose to use this approach -- things can easily get swapped and messed up if not!
+
+Now for the density plots:
+
+```
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+results <- bind_rows(
+  data.frame(comparison = "bmv01", null = null_bm.ou1$x, test = test_bm.ou1$x, lr = lr_bmvou1),
+  data.frame(comparison = "ou1vh3", null = null_ou1.h3$x, test = test_ou1.h3$x, lr = lr_H2.ou1vH3.OUM)) %>%
+  gather(variable, value, - comparison, - lr)
+ggplot(results) + 
+  geom_density(aes(value, fill = variable), alpha=0.5) + 
+  geom_vline(aes(xintercept=lr)) +
+  facet_wrap(~ comparison, scales="free") +
+  scale_x_continuous(limits=c(min(results$value),max(results$value)))
+```
+
+Once more: Note that the 'lr' (likelihood ratio statistic values) are stored in objects (lr_bmvou1, lr_H2.ou1vH3.OUM) as are the null and test distributions. Check and double-check that these are correct before running the code.
+

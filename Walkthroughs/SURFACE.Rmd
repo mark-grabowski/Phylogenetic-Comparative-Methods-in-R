@@ -1,0 +1,258 @@
+# Tree Time: Phylogenetic Comparative Methods in R
+## SURFACE
+
+Now that we've fit alternative models to evaluate evolutionary hypotheses about hand shape, let's fit a model without specifying regimes a priori. There are a number of different methods available to do this. However, we need a method that can (1) specify regimes using only a phylogeny and a data set, (2) accommodate multivariate data sets, and (3) include fossil taxa (i.e., non-ultrametric trees). ```SURFACE``` (Ingram and Mahler, 2013) fulfills our needs (With a caveat about multivariate data, which we will revisit later). None of the other available methods can do all of this stuff (e.g., ``PhylogeneticEM``, ``L1OU``, ``OUCH``, ``mvMORPH``, ``bayou``, ``SLOUCH``, ``mvSLOUCH``).
+
+We will use the same data set and phylogeny as before, which are available on Mark's github page and the Dryad Digital Data Repository:
+
+http://datadryad.org/stash/dataset/doi:10.5061/dryad.tmpg4f4x7
+
+Load the R packages:
+
+```{r}
+library(surface)
+library(phytools)
+library(picante)
+library(MASS)
+library(mvMORPH)
+```
+
+Set your working directory to the folder on your computer containing the data and tree:
+
+```
+setwd("[YOUR FILE PATH HERE]")
+```
+
+If you don't have these R objects stored in your workspace we can redo it. Import the tree and data set:
+
+```{r}
+tree <- read.nexus("tree.nex") # Molecular consensus tree from 10k trees with fossil taxa added in Mesquite
+data <- read.csv("data.csv")
+data <- na.omit(data[,3:29]) # Remove rows with missing values
+names <- data$taxon # Assign taxon names to an object called 'names' for use later
+```
+
+Generate shape variables:
+
+```{r}
+geomean <- as.matrix(apply(data[-1], 1, function(x) exp(mean(log(x))))) # Calculate a geometric mean for each row
+data["geomean"] <- geomean # Add geometric mean column to data
+data.gm <- as.matrix(apply(data[-1], 2, function(x) log(x/data$geomean))) # Divide each column by the geomean and log the value
+data.gm <- data.gm[,-27] # Drop geomean column
+data.gm <- as.data.frame(data.gm)
+data.gm["taxon"] <- names
+```
+
+Reduce the dimensionality of the data set using PCA:
+
+```{r}
+pca <- prcomp(data.gm[-27], scale = FALSE)  # PCA on variance-covariance matrix
+pc.scores <- as.data.frame(pca$x) # Store PC scores in an object for use in subsequent analyses
+```
+
+Calculate mean principal component scores per taxon and match their order with the tip labels of the tree:
+
+```{r}
+pc.scores["taxon"] <- data$taxon # Add taxon column to PC scores
+pc.scores.avg <- aggregate(pc.scores[, 1:3], list(pc.scores$taxon), mean) # Retain the first 3 PCs
+row.names(pc.scores.avg) <- pc.scores.avg$Group.1 # Add row names to mean PC scores
+pc.scores.avg <- pc.scores.avg[,2:4] # Retain the PC scores
+comp.data <- match.phylo.data(tree, pc.scores.avg) # Match the order of the PC scores with the tip labels of the tree
+```
+
+### SURFACE analysis (Ingram and Mahler, 2013)
+
+Before we can perform the analysis, we must format the data and phylogeny.
+
+```{r}
+pc.data <- comp.data$data # Assign comparative PC data to an object called 'pc.data'
+tree_named <-nameNodes(comp.data$phy) # Prepare the phylogenetic tree
+olist<-convertTreeData(tree_named,pc.data) # Combine tree and data in OUCH/SURFACE format
+otree<-olist[[1]]; odata<-olist[[2]] # Extract tree and data in OUCH/SURFACE format
+```
+
+SURFACE works in two phases: A forward phase in which regimes are added and a backward phase in which regimes are collapsed. Initiate the forward phase (it's normal for this step to take a couple of minutes):
+
+```{r}
+fwd <- surfaceForward(otree, odata, aic_threshold = 0, exclude = 0,verbose = FALSE, plotaic = FALSE)
+k <- length(fwd)
+fsum <- surfaceSummary(fwd)
+```
+
+It can be helpful to examine the AIC values for each model proposed in the forward phase:
+
+```{r}
+fsum$aics
+plot(fsum$aics) # We will come back to this later
+```
+
+Initiate the backward phase (collapsing regimes), which might also take a bit of time:
+
+```{r}
+bwd <- surfaceBackward(otree, odata, starting_model = fwd[[k]], aic_threshold = 0,only_best = TRUE, verbose = FALSE, plotaic = FALSE)
+bsum <- surfaceSummary(bwd)
+kk <- length(bwd)
+```
+
+First, we will plot the tree with the branches painted according to the regimes identified by SURFACE. We will start with 'convcol = FALSE' to color by regime.
+
+```{r}
+surfaceTreePlot(tree_named, bwd[[kk]], convcol = FALSE, labelshifts = TRUE) # Plot tree with regimes
+
+surfaceTreePlot(tree_named, bwd[[kk]], convcol = TRUE, labelshifts = TRUE) # Plot tree with convergent regimes
+```
+
+Did SURFACE recover support for convergent evolution of hand shape? Which taxa (branches painted red and blue)?
+
+```
+|
+|
+```
+
+Now, let's plot the PC score data for the species along with the estimated phenotypic optima (theta parameter).
+
+```{r}
+par(mfrow=c(1,2), mai=c(0.8,0.8,0.2,0.2)) # use par to combine two plots in one row.
+
+surfaceTraitPlot(pc.data, bwd[[kk]], # plot PC data with estimated optima
+    y.lim = c(-0.7, 1.4), # set y axis limits to accommodate range of data in both plots
+    x.lim = c(-1.0, 1.5), # set x axis limits to accommodate range of data in both plots
+    whattraits = c(1,2)) 
+    
+surfaceTraitPlot(pc.data, bwd[[kk]],
+    y.lim = c(-0.7, 1.4), 
+    x.lim = c(-1.0, 1.5), 
+    whattraits = c(1,3))
+
+dev.off() # reset par settings
+```
+
+We should also extract the estimated parameter values for our best-fitting SURFACE model. Here is one way to do it:
+
+```{r}
+bsum$alpha # alpha parameter
+bsum$phylhalflife # phylogenetic half life (t1/2)
+bsum$sigma_squared # sigma squared
+bsum$theta # estimated optima
+bsum$n_regimes # number of regimes
+```
+
+One of the limitations of SURFACE is that it can provide support for model fits that are too complex because models with slightly more favorable AIC values will be accepted. It might be useful to explore simpler models identified by ``SURFACE``.
+
+```{r}
+fsum$aics
+plot(fsum$aics) # Remember this? It looks like a model with 12 or 11 regimes might work well too. 
+
+# 12 regimes
+surfaceTreePlot(tree_named, fwd[[12]], convcol = FALSE, labelshifts = TRUE)
+surfaceTraitPlot(pc.data, fwd[[12]], convcol = FALSE, whattraits = c(1,2))
+surfaceTraitPlot(pc.data, fwd[[12]], convcol = FALSE, whattraits = c(1,3))
+
+# 11 regimes
+surfaceTreePlot(tree_named, fwd[[11]], convcol = FALSE, labelshifts = TRUE)
+surfaceTraitPlot(pc.data, fwd[[11]], convcol = FALSE, whattraits = c(1,2))
+surfaceTraitPlot(pc.data, fwd[[11]], convcol = FALSE, whattraits = c(1,3))
+
+#10 regimes
+surfaceTreePlot(tree_named, fwd[[10]], convcol = FALSE, labelshifts = TRUE)
+surfaceTraitPlot(pc.data, fwd[[10]], convcol = FALSE, whattraits = c(1,2))
+surfaceTraitPlot(pc.data, fwd[[10]], convcol = FALSE, whattraits = c(1,3))
+
+# And so on...
+# Remember: "All models are wrong, but some are useful." -- George Box
+```
+
+### Model comparison: SURFACE & mvMORPH
+
+Now that we've fit a model using ``SURFACE``, let's translate it into a model that we can compare to our a priori models using ``mvMORPH`` (Clavel et al., 2015). Although ``SURFACE`` accommodates the use of multivariate data, it is actually not a 'true' multivariate analysis. However, ``mvMORPH`` is truly multivariate (hence the 'mv' part).  
+
+First, we will construct our best-fitting model as identified by ``mvMORPH`` using AICc. You may already have this object stored in your R workspace.
+
+```{r}
+H4.regimes <- as.vector(c(rep("palm",6), 
+                      rep("susp",5), 
+                      rep("palm",6), 
+                      rep("susp",1), 
+                      rep("kw",3), 
+                      rep("biped", 1), 
+                      rep("susp",5), 
+                      rep("kw",2), 
+                      rep("susp",3), 
+                      rep("palm",3), 
+                      rep("dig", 1), 
+                      rep("palm", 3), 
+                      rep("dig",1),
+                      rep("palm",1),
+                      rep("dig", 8),
+                      rep("palm", 4),
+                      rep("kw",1),
+                      rep("biped", 4)))
+names(H4.regimes) <- comp.data$phy$tip.label # assign taxon names to regime labels
+print(H4.regimes) # examine
+
+H4.tree <- make.simmap(comp.data$phy, H4.regimes, model="ER", nsims=1)
+plot(H4.tree, fsize = 0.5) # examine
+```
+
+Next, let's translate our ``SURFACE`` model into ``mvMORPH``.
+
+```{r}
+SRF.regimes <- as.vector(c(rep("Anthro",6), # Anthropoid root
+                      rep("Ateles",5), # Ateles & Brachyteles
+                      rep("Anthro",2), # Lagothrix & Aotus
+                      rep("Cebus",4), # Cebus, Saimiri, & Papionins w/o baboons & geladas
+                      rep("Hylo",1), # Hylobatids
+                      rep("Gor",3), # Gorilla
+                      rep("Homo",1), # Homo & Australopithecus
+                      rep("Hylo",5), # Hylobatids
+                      rep("Chimp",2), # Chimpanzees, bonobos, and Ardipithecus
+                      rep("Orang",2), # Orangutans
+                      rep("Hylo",1), # Hylobatids
+                      rep("Anthro",3), # Anthropoid root
+                      rep("Cebus",9), # Papionins without baboons & geladas
+                      rep("Bab",5), # Baboons & geladas
+                      rep("Colo", 1), # Colobus polykomos
+                      rep("Anthro", 3), # Anthropoid root
+                      rep("Chimp", 1), # Chimpanzees, bonobos, and Ardipithecus
+                      rep("Homo", 4))) # Homo & Australopithecus
+                       
+names(SRF.regimes) <- comp.data$phy$tip.label
+print(SRF.regimes) # examine
+
+SRF.tree <- make.simmap(comp.data$phy, SRF.regimes, model="ER", nsim=1)
+plot(SRF.tree, fsize = 0.5) 
+
+# Note: hylobatids and orangutans did not receive a color assignment
+```
+Fit each model using ``mvMORPH``.
+
+```{r}
+# H4. Multi-optimum OU model
+H4.OUM <- mvOU(tree = H4.tree, data = comp.data$data, model = "OUM", param = list(root = FALSE))
+
+# SRF. Multi-optimum OU model
+SRF.OUM <- mvOU(tree = SRF.tree, data = comp.data$data, model = "OUM", param = list(root = FALSE))
+```
+
+Let's examine AICc values:
+
+```{r}
+AICc <- list(H4.OUM$AICc, SRF.OUM$AICc)
+names(AICc) <- c("H4.OUM", "SRF.OUM")
+print(AICc)
+```
+
+According to information criteria, which is the best fitting model given this data set and phylogeny?
+
+```
+|
+|
+```
+
+In the real world, it would be a good idea to compare the model fit by ``SURFACE`` to all of the models using ``mvMORPH`` based on AIC, AICc, and Phylogenetic Monte Carlo simulations.
+
+### References
+
+Clavel, J., Escarguel, G., Merceron, G. 2015. mvMORPH: an R package for fitting multivariate evolutionary models to morphometric data. Methods in Ecology and Evolution 6, 1311-1319.
+
+Ingram, T., Mahler, D.L. 2013. SURFACE: detecting convergent evolution from comparative data by fitting Ornstein-Uhlenbeck models with stepwise Akaike Information Criterion. Methods in Ecology and Evolution 4, 416-425.
